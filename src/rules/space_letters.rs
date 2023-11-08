@@ -23,41 +23,51 @@
 //! - *啊 *a -> *啊*a
 
 use crate::{
+    char_kind::{CharKind, CharKindTrait},
     config::Config,
-    parser::{CharKind, CharKindTrait, Cursor},
+    parser::TextCursor,
+    Context,
 };
 
-pub fn rule(cursor: &mut Cursor, config: &Config) {
+pub fn rule(_ctx: &Context, cursor: &mut TextCursor, config: &Config) {
     // 1. no space between full width letters
-    if config.no_space_between_full_width_letters
-        && cursor.previous().kind() == CharKind::LettersFull
+    if config.rules.no_space_between_full_width_letters
+        && cursor.prev().kind() == CharKind::LettersFull
         && cursor.current().is_whitespace()
         && cursor.next().kind() == CharKind::LettersFull
     {
-        cursor.remove()
+        cursor.delete();
     }
 
     // 2. space between mixed width letters
-    match config.space_between_mixed_width_letters {
+    match config.rules.space_between_mixed_width_letters {
         Some(true) => {
-            if (!config.skip_zh_units.contains(&cursor.current())
-                && !config.skip_zh_units.contains(&cursor.previous()))
-                && (cursor.previous().kind() == CharKind::LettersFull
-                    && cursor.current().kind() == CharKind::LettersHalf
-                    || cursor.previous().kind() == CharKind::LettersHalf
-                        && cursor.current().kind() == CharKind::LettersFull)
+            if cursor.current().kind() == CharKind::LettersFull
+                && cursor.next().kind() == CharKind::LettersHalf
+                && !config.rules.skip_zh_units.contains(&cursor.current())
             {
-                cursor.add(' ')
+                cursor.add_next(' ');
+            }
+
+            if cursor.prev().kind() == CharKind::LettersHalf
+                && cursor.current().kind() == CharKind::LettersFull
+                && !config.rules.skip_zh_units.contains(&cursor.current())
+            {
+                cursor.add_prev(' ');
             }
         }
         Some(false) => {
-            if cursor.current().is_whitespace()
-                && (cursor.previous().kind() == CharKind::LettersFull
-                    && cursor.next().kind() == CharKind::LettersHalf
-                    || cursor.previous().kind() == CharKind::LettersHalf
-                        && cursor.next().kind() == CharKind::LettersFull)
+            if cursor.prev().kind() == CharKind::LettersFull
+                && cursor.current().is_whitespace()
+                && cursor.next().kind() == CharKind::LettersHalf
             {
-                cursor.remove()
+                cursor.delete();
+            }
+            if cursor.prev().kind() == CharKind::LettersHalf
+                && cursor.current().is_whitespace()
+                && cursor.next().kind() == CharKind::LettersFull
+            {
+                cursor.delete();
             }
         }
         None => (),

@@ -1,203 +1,165 @@
-use std::io::BufWriter;
-use std::str;
+use std::{fmt, iter};
 
-use comrak::{
-    format_commonmark,
-    nodes::{AstNode, NodeValue},
-    parse_document, Arena, Options,
-};
-use itertools::Itertools;
-use regex::Regex;
+use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark_to_cmark::cmark;
 
 use crate::{
     config::Config,
-    parser::{tokenize, CharKind, CharKindTrait, Cursor},
+    ignore::{get_ignore_list_from_events, get_ignore_ranges, Ignore},
+    parser::EventCursor,
+    rules::rules,
 };
 
+pub mod char_kind;
 pub mod config;
+pub mod ignore;
 pub mod parser;
 pub mod rules;
 
-pub fn run_text(mut text: &str, config: &Config) -> String {
-    if config.trim_space {
-        text = text.trim();
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    pub code_block_mark: bool,
+
+    pub half_width_single_quote_count: u32,
+    pub half_width_double_quote_count: u32,
+}
+
+impl Context {
+    pub fn new() -> Self {
+        Self::default()
     }
-    let mut tokens = tokenize(text).collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return "".to_string();
+
+    pub fn clear(&mut self) {
+        self.half_width_single_quote_count = 0;
+        self.half_width_double_quote_count = 0;
     }
-    let mut cursor = Cursor::new(&mut tokens);
-    loop {
-        cursor.skip_str(&config.skip_abbrs);
-        for rule in rules::rules() {
-            rule(&mut cursor, config);
+}
+
+const FRONT_MATTER_DELIMITERS: [&str; 2] = ["---\n", "+++\n"];
+
+fn cut_front_matter(text: &str) -> (&str, &str) {
+    for front_matter_delimiter in FRONT_MATTER_DELIMITERS {
+        if let Some(slice) = text.strip_prefix(front_matter_delimiter) {
+            if let Some(index_of_ending_line) = slice.find(front_matter_delimiter) {
+                return text.split_at(index_of_ending_line + front_matter_delimiter.len() * 2);
+            }
         }
-        if let Some(c) = cursor.advance() {
-            cursor = c;
+    }
+
+    ("", text)
+}
+
+pub fn run<W: fmt::Write>(text: &str, config: &Config, mut writer: W) -> Result<(), fmt::Error> {
+    let (front_matter, text) = cut_front_matter(text);
+
+    let rules = rules();
+
+    let options = Options::empty();
+
+    let mut ignore = match get_ignore_list_from_events(Parser::new_ext(text, options)) {
+        Ignore::Disabled => {
+            writer.write_str(front_matter)?;
+            writer.write_str(text)?;
+            return Ok(());
+        }
+        Ignore::Ignore(ignore) => ignore,
+    };
+    ignore.append(&mut config.ignores.clone());
+
+    let ignore_ranges = get_ignore_ranges(text, &ignore).unwrap();
+
+    let mut event_cursor = EventCursor::new(Parser::new_ext(text, options).into_offset_iter());
+    let mut context = Context::new();
+
+    let t = iter::from_fn(|| {
+        if let Some(event) = &event_cursor.current_event {
+            let mut res = event.0.clone();
+            match &event.0 {
+                Event::Start(tag) => {
+                    if !matches!(
+                        tag,
+                        Tag::Emphasis
+                            | Tag::Strong
+                            | Tag::Strikethrough
+                            | Tag::Link(..)
+                            | Tag::Image(..)
+                    ) {
+                        context.clear();
+                    }
+                    if matches!(tag, Tag::CodeBlock(_)) {
+                        context.code_block_mark = true
+                    }
+                }
+                Event::End(Tag::CodeBlock(_)) => context.code_block_mark = false,
+                Event::Text(_) if !context.code_block_mark => {
+                    let mut text_cursor = event_cursor.to_text_cursor().unwrap();
+
+                    loop {
+                        if text_cursor.current() == '\'' {
+                            context.half_width_single_quote_count += 1;
+                        }
+                        if text_cursor.current() == '"' {
+                            context.half_width_double_quote_count += 1;
+                        }
+
+                        text_cursor.skip_str(&config.rules.skip_abbrs);
+
+                        let mut skip_flag = false;
+
+                        for ignore_range in &ignore_ranges {
+                            if let Some(current_offset) = text_cursor.current_offset() {
+                                if ignore_range.contains(&current_offset) {
+                                    skip_flag = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !skip_flag {
+                            for rule in &rules {
+                                rule(&context, &mut text_cursor, config);
+                            }
+                        }
+
+                        if !text_cursor.advance() {
+                            break;
+                        }
+                    }
+
+                    res = Event::Text(String::from(text_cursor).into());
+                }
+                _ => (),
+            };
+            event_cursor.advance();
+            Some(res)
         } else {
-            break;
-        }
-    }
-    tokens.into_iter().filter(|x| x != &'\0').collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MarkdownNodeKind {
-    Text,
-    Code,
-    Link,
-    Other,
-}
-
-fn iter_nodes<'a, F>(node: &'a AstNode<'a>, config: &Config, f: &F)
-where
-    F: Fn(&'a AstNode<'a>, &Config),
-{
-    f(node, config);
-
-    let mut previous_kind = MarkdownNodeKind::Other;
-    let mut previous_node: Option<
-        &comrak::arena_tree::Node<'_, std::cell::RefCell<comrak::nodes::Ast>>,
-    > = None;
-
-    for c in node.children() {
-        iter_nodes(c, config, f);
-
-        match &mut c.data.borrow_mut().value {
-            NodeValue::Text(ref mut text) => {
-                let first_char = text.chars().next().unwrap_or('\0');
-                if previous_kind == MarkdownNodeKind::Code && !first_char.is_punctuation() {
-                    match config.space_outside_code {
-                        Some(true) => {
-                            if first_char.kind() != CharKind::Space {
-                                text.insert(0, ' ');
-                            }
-                        }
-                        Some(false) => {
-                            if first_char.kind() == CharKind::Space {
-                                text.remove(0);
-                            }
-                        }
-                        None => (),
-                    }
-                }
-                if previous_kind == MarkdownNodeKind::Link && !first_char.is_punctuation() {
-                    match config.space_outside_link {
-                        Some(true) => {
-                            if first_char.kind() != CharKind::Space {
-                                text.insert(0, ' ');
-                            }
-                        }
-                        Some(false) => {
-                            if first_char.kind() == CharKind::Space {
-                                text.remove(0);
-                            }
-                        }
-                        None => (),
-                    }
-                }
-                previous_kind = MarkdownNodeKind::Text;
-            }
-            NodeValue::Code(_) => {
-                if previous_kind == MarkdownNodeKind::Text {
-                    if let NodeValue::Text(ref mut text) =
-                        previous_node.unwrap().data.borrow_mut().value
-                    {
-                        let last_char = text.chars().last().unwrap_or('\0');
-                        if !last_char.is_punctuation() {
-                            match config.space_outside_code {
-                                Some(true) => {
-                                    if last_char.kind() != CharKind::Space {
-                                        text.push(' ');
-                                    }
-                                }
-                                Some(false) => {
-                                    if last_char.kind() == CharKind::Space {
-                                        text.remove(text.len() - 1);
-                                    }
-                                }
-                                None => (),
-                            }
-                        }
-                    }
-                }
-                previous_kind = MarkdownNodeKind::Code;
-            }
-            NodeValue::Link(_) => {
-                if previous_kind == MarkdownNodeKind::Text {
-                    if let NodeValue::Text(ref mut text) =
-                        previous_node.unwrap().data.borrow_mut().value
-                    {
-                        let last_char = text.chars().last().unwrap_or('\0');
-                        if !last_char.is_punctuation() {
-                            match config.space_outside_link {
-                                Some(true) => {
-                                    if last_char.kind() != CharKind::Space {
-                                        text.push(' ');
-                                    }
-                                }
-                                Some(false) => {
-                                    if last_char.kind() == CharKind::Space {
-                                        text.remove(text.len() - 1);
-                                    }
-                                }
-                                None => (),
-                            }
-                        }
-                    }
-                }
-                previous_kind = MarkdownNodeKind::Link;
-            }
-            _ => previous_kind = MarkdownNodeKind::Other,
-        }
-        previous_node = Some(c);
-    }
-}
-
-pub fn run_markdown(markdown: &str, config: &Config) -> String {
-    let mut replace_log: Vec<String> = Vec::new();
-
-    let markdown = markdown
-        .split('\n')
-        .map(|x| {
-            for ignore in &config.ignore {
-                if Regex::new(ignore).unwrap().is_match(x) {
-                    replace_log.push(x.to_string());
-                    return format!("\n\n\u{FFFD}\u{FFFE}\u{FFFF}{}\n\n", replace_log.len() - 1);
-                }
-            }
-            x.to_string()
-        })
-        .join("\n");
-
-    let mut options = Options::default();
-    options.extension.strikethrough = true;
-    options.extension.tagfilter = true;
-    options.extension.table = true;
-    options.extension.tasklist = true;
-    options.extension.superscript = true;
-    options.extension.footnotes = true;
-    options.extension.description_lists = true;
-    options.extension.front_matter_delimiter = Some(config.front_matter_delimiter.to_owned());
-
-    let arena = Arena::new();
-    let root = parse_document(&arena, &markdown, &options);
-
-    iter_nodes(root, config, &|node, config| {
-        if let NodeValue::Text(ref mut text) = node.data.borrow_mut().value {
-            let orig: String = std::mem::take(text);
-            *text = run_text(&orig, config);
+            None
         }
     });
 
-    let mut buf = BufWriter::new(Vec::new());
-    format_commonmark(root, &options, &mut buf).unwrap();
-    let bytes = buf.into_inner().unwrap();
-    let mut res = String::from_utf8(bytes).unwrap().trim().to_string() + "\n";
+    writer.write_str(front_matter)?;
+    cmark(t, writer)?;
+    Ok(())
+}
 
-    for (i, log) in replace_log.iter().enumerate() {
-        res = res.replacen(&format!("\u{FFFD}\u{FFFE}\u{FFFF}{}", i), log, 1);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test() {
+        let text = r#"---
+a = 1
+b = 2
+---
+# 1
+## 2
+"#;
+
+        let mut res = String::new();
+
+        run(text, &Config::default(), &mut res).unwrap();
+
+        println!("{}", res);
     }
-
-    res
 }

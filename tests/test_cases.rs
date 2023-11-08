@@ -1,33 +1,31 @@
-use zh_formatter::{config::Config, run_markdown};
+use zhlint::{config::Config, run};
 
-pub fn run_text(text: &str, config: &Config) -> String {
-    run_markdown(text, config)
-        .trim_end_matches('\n')
-        .to_string()
-}
-
-fn config() -> Config {
-    toml::from_str("").unwrap()
+fn run_text(text: &str, config: &Config) -> String {
+    let mut res = String::new();
+    run(text, config, &mut res).unwrap();
+    res
 }
 
 #[test]
 fn test_zh_units() {
     assert_eq!(
-        run_text(
-            r#"2019年06月26号 2019-06-26 12:00"#,
-            &Config {
-                space_after_half_width_punctuation: Some(true),
-                ..Default::default()
-            }
-        ),
+        run_text(r#"2019年06月26号 2019-06-26 12:00"#, &Config::default()),
         r#"2019年06月26号 2019-06-26 12:00"#
     );
+    assert_eq!(
+        run_text(
+            r#"1《测试》2【测试】3「测试」4（测试）"#,
+            &Config::default()
+        ),
+        r#"1《测试》2【测试】3“测试”4(测试)"#
+    ); // diff
+    assert_eq!(run_text(r#"1？2！"#, &Config::default()), r#"1？2！"#);
 }
 
 #[test]
 fn test_abbrs() {
     assert_eq!(
-        run_text(r#"运行时 + 编译器 vs. 只包含运行时"#, &config()),
+        run_text(r#"运行时 + 编译器 vs. 只包含运行时"#, &Config::default()),
         r#"运行时 + 编译器 vs. 只包含运行时"#
     );
 }
@@ -35,29 +33,42 @@ fn test_abbrs() {
 #[test]
 fn test_backslash() {
     assert_eq!(
-        run_text(r"This\# is \#not a heading but a normal hash", &config()),
+        run_text(
+            r"This\# is \#not a heading but a normal hash",
+            &Config::default()
+        ),
         r"This\# is \#not a heading but a normal hash"
     );
     assert_eq!(
-        run_text(r"这个\#是普通的 \# 井号而不是标题", &config()),
+        run_text(r"这个\#是普通的 \# 井号而不是标题", &Config::default()),
         r"这个\#是普通的 \# 井号而不是标题"
     );
 }
 
 #[test]
 fn test_ellipsis() {
-    assert_eq!(run_text(r"aaa...bbb", &config()), r"aaa...bbb");
-    assert_eq!(run_text(r"aaa... bbb", &config()), r"aaa... bbb");
-    assert_eq!(run_text(r"aaa ...bbb", &config()), r"aaa...bbb");
-    // assert_eq!(run_text(r"`aaa` ... `bbb`", &config()), r"`aaa` ... `bbb`");
+    // diff
+    assert_eq!(run_text(r"aaa...bbb", &Config::default()), r"aaa... bbb");
+    assert_eq!(run_text(r"aaa... bbb", &Config::default()), r"aaa... bbb");
+    assert_eq!(run_text(r"aaa ...bbb", &Config::default()), r"aaa... bbb");
+    assert_eq!(
+        run_text(r"`aaa` ... `bbb`", &Config::default()),
+        r"`aaa` ... `bbb`"
+    );
 }
 
 #[test]
 fn test_url() {
-    assert_eq!(run_text(r"Vue.js 是什么", &config()), r"Vue.js 是什么");
-    assert_eq!(run_text(r"www.vuejs.org", &config()), r"www.vuejs.org");
     assert_eq!(
-        run_text(r"https://vuejs.org", &config()),
+        run_text(r"Vue.js 是什么", &Config::default()),
+        r"Vue.js 是什么"
+    );
+    assert_eq!(
+        run_text(r"www.vuejs.org", &Config::default()),
+        r"www.vuejs.org"
+    );
+    assert_eq!(
+        run_text(r"https://vuejs.org", &Config::default()),
         r"https://vuejs.org"
     );
 }
@@ -65,7 +76,7 @@ fn test_url() {
 #[test]
 fn test_slash_character() {
     assert_eq!(
-        run_text(r"想知道 Vue 与其它库/框架有哪些区别", &config()),
+        run_text(r"想知道 Vue 与其它库/框架有哪些区别", &Config::default()),
         r"想知道 Vue 与其它库/框架有哪些区别"
     );
 }
@@ -73,20 +84,24 @@ fn test_slash_character() {
 #[test]
 fn test_special_character() {
     assert_eq!(
-        run_text(r"Vue (读音 /vjuː/，类似于)", &config()),
+        run_text(r"Vue (读音 /vjuː/，类似于)", &Config::default()),
         r"Vue (读音 /vjuː/，类似于)"
     );
 }
 
 #[test]
 fn test_half_content_mark_half_content() {
-    assert_eq!(run_text(r"a__[b](x)__c", &config()), r"a\_\_[b](x)\_\_c");
+    // diff
+    assert_eq!(
+        run_text(r"a__[b](x)__c", &Config::default()),
+        r"a\_\_[b](x)\_\_c"
+    );
 }
 
 #[test]
 fn test_plural_brackets() {
     assert_eq!(
-        run_text(r"3 minite(s) left", &config()),
+        run_text(r"3 minite(s) left", &Config::default()),
         r"3 minite(s) left"
     );
 }
@@ -94,29 +109,32 @@ fn test_plural_brackets() {
 #[test]
 fn test_single_quote_for_shorthand() {
     assert_eq!(
-        run_text(r"how many user's here", &config()),
+        run_text(r"how many user's here", &Config::default()),
         r"how many user's here"
     );
     assert_eq!(
-        run_text(r"how many users' items here", &config()),
+        run_text(r"how many users' items here", &Config::default()),
         r"how many users' items here"
     );
-    assert_eq!(run_text(r"what's going on", &config()), r"what's going on");
+    assert_eq!(
+        run_text(r"what's going on", &Config::default()),
+        r"what's going on"
+    );
 }
 
 #[test]
 fn test_math_exp() {
-    assert_eq!(run_text(r"1+1=2", &config()), r"1+1=2");
-    assert_eq!(run_text(r"a|b", &config()), r"a|b");
-    assert_eq!(run_text(r"a | b", &config()), r"a | b");
-    assert_eq!(run_text(r"a||b", &config()), r"a||b");
-    assert_eq!(run_text(r"a || b", &config()), r"a || b");
+    assert_eq!(run_text(r"1+1=2", &Config::default()), r"1+1=2");
+    assert_eq!(run_text(r"a|b", &Config::default()), r"a|b");
+    assert_eq!(run_text(r"a | b", &Config::default()), r"a | b");
+    assert_eq!(run_text(r"a||b", &Config::default()), r"a||b");
+    assert_eq!(run_text(r"a || b", &Config::default()), r"a || b");
 }
 
 #[test]
 fn test_arrow_chars() {
     assert_eq!(
-        run_text(r"Chrome 顶部导航 > 窗口 > 任务管理", &config()),
-        r"Chrome 顶部导航 \> 窗口 \> 任务管理"
+        run_text(r"Chrome 顶部导航 > 窗口 > 任务管理", &Config::default()),
+        r"Chrome 顶部导航 > 窗口 > 任务管理"
     );
 }

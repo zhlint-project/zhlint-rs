@@ -1,29 +1,29 @@
 [package]
-name = "zh-formatter"
+name = "zhlint-rs"
 version = "0.1.0"
 authors = ["st1020 <stone_1020@qq.com>"]
 edition = "2021"
 description = "A formatter tool for Chinese text content."
 readme = "README.md"
-repository = "https://github.com/st1020/zh-formatter"
+repository = "https://github.com/zhlint-project/zhlint-rs"
 license = "MIT OR Apache-2.0"
 keywords = ["cli", "formatter", "chinese", "cjk", "markdown"]
 categories = ["text-processing", "value-formatting", "development-tools"]
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
-comrak = "0.19"
 glob = "0.3"
-itertools = "0.11"
+pulldown-cmark = "0.9.3"
+pulldown-cmark-to-cmark = "11.0.0"
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 unicode-width = "0.1"
 
 [lib]
-name = "zh_formatter"
+name = "zhlint"
 path = "src/lib.rs"
 
 [[bin]]
-name = "zh-formatter"
+name = "zhlint"
 path = "src/main.rs"

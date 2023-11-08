@@ -10,26 +10,28 @@
 //! - skip ' between half-width content
 
 use crate::{
+    char_kind::{CharKind, CharKindTrait},
     config::Config,
-    parser::{CharKind, CharKindTrait, Cursor},
+    parser::{TextCursor, Token},
+    Context,
 };
 
-pub fn rule(cursor: &mut Cursor, config: &Config) {
+pub fn rule(ctx: &Context, cursor: &mut TextCursor, config: &Config) {
     // skip non-punctuation situations
     if !cursor.current().is_punctuation() {
         return;
     }
     // skip half-width punctuations between half-width content without space
     if cursor.current().kind() == CharKind::PunctuationHalf
-        && cursor.previous().kind() == CharKind::LettersHalf
+        && cursor.prev_skip_space().kind() == CharKind::LettersHalf
         && (cursor.next_skip_space().kind() == CharKind::LettersHalf
-            || cursor.next_skip_space() == '\0')
+            || !matches!(cursor.next_skip_space(), Token::Char(_)))
     {
         return;
     }
     // skip ' between half-width content
     if cursor.current() == '\''
-        && cursor.previous_skip_space().is_half_width()
+        && cursor.prev_skip_space().is_half_width()
         && cursor.next_skip_space().is_half_width()
     {
         return;
@@ -39,42 +41,46 @@ pub fn rule(cursor: &mut Cursor, config: &Config) {
         && !cursor.current().is_bracket()
         && !cursor.current().is_quote()
         && cursor.current() != '\''
-        && (cursor.previous().kind() == CharKind::PunctuationHalf
-            && !cursor.previous().is_bracket()
-            && !cursor.previous().is_quote()
-            && cursor.previous() != '\''
+        && (cursor.prev().kind() == CharKind::PunctuationHalf
+            && !cursor.prev().is_bracket()
+            && !cursor.prev().is_quote()
+            && cursor.prev() != Token::Char('\'')
             || cursor.next().kind() == CharKind::PunctuationHalf
                 && !cursor.next().is_bracket()
                 && !cursor.next().is_quote()
-                && cursor.next() != '\'')
+                && cursor.next() != Token::Char('\''))
     {
         return;
     }
 
     if config
+        .rules
         .half_width_punctuation
         .contains(cursor.current().to_half_width())
     {
-        cursor.set(cursor.current().to_half_width())
+        cursor.replace(cursor.current().to_half_width());
     }
+
     if config
+        .rules
         .full_width_punctuation
         .contains(cursor.current().to_full_width())
     {
-        cursor.set(cursor.current().to_full_width())
+        cursor.replace(cursor.current().to_full_width());
     }
-    if cursor.current() == '"' && config.full_width_punctuation.contains("“”") {
-        cursor.set(if cursor.search_previous(|c| c == '“', |c| c == '”') {
-            '”'
+
+    if cursor.current() == '"' && config.rules.full_width_punctuation.contains("“”") {
+        if ctx.half_width_double_quote_count % 2 == 1 {
+            cursor.replace('“');
         } else {
-            '“'
-        })
+            cursor.replace('”');
+        }
     }
-    if cursor.current() == '\'' && config.full_width_punctuation.contains("‘’") {
-        cursor.set(if cursor.search_previous(|c| c == '‘', |c| c == '’') {
-            '’'
+    if cursor.current() == '\'' && config.rules.full_width_punctuation.contains("‘’") {
+        if ctx.half_width_single_quote_count % 2 == 1 {
+            cursor.replace('‘');
         } else {
-            '‘'
-        })
+            cursor.replace('’');
+        }
     }
 }

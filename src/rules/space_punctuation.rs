@@ -24,54 +24,58 @@
 //! - skip half-width punctuations between half-width content without space
 //! - skip successive multiple half-width punctuations
 
+use pulldown_cmark::Event;
+
 use crate::{
+    char_kind::{CharKind, CharKindTrait},
     config::Config,
-    parser::{CharKind, CharKindTrait, Cursor},
+    parser::{TextCursor, Token},
+    Context,
 };
 
-pub fn rule(cursor: &mut Cursor, config: &Config) {
+pub fn rule(_ctx: &Context, cursor: &mut TextCursor, config: &Config) {
     // 1. no space before punctuation
-    if config.no_space_before_punctuation
+    if config.rules.no_space_before_punctuation
+        && !matches!(cursor.prev(), Token::Event(Event::Code(_)))
         && cursor.current().is_whitespace()
         && cursor.next().is_common_punctuation()
     {
-        cursor.remove()
+        cursor.delete();
     }
 
     // 2. space after half width punctuation
-    match config.space_after_half_width_punctuation {
+    match config.rules.space_after_half_width_punctuation {
         Some(true) => {
-            if cursor.previous().kind() == CharKind::PunctuationHalf
-                && cursor.previous().is_common_punctuation()
-                && !cursor.current().is_whitespace()
+            if cursor.current().kind() == CharKind::PunctuationHalf
+                && cursor.current().is_common_punctuation()
+                && cursor.next().kind() != CharKind::Space
                 // skip successive multiple half-width punctuations
-                && !(cursor.current().kind() == CharKind::PunctuationHalf
-                    && cursor.current().is_common_punctuation())
-                && cursor.previous_two().kind() != CharKind::PunctuationHalf
+                && !(cursor.next().kind() == CharKind::PunctuationHalf
+                    && cursor.next().is_common_punctuation())
                 // skip half-width punctuations between half-width content without space
-                && !(cursor.current().kind() == CharKind::LettersHalf
-                    && cursor.previous_two().kind() == CharKind::LettersHalf)
+                && !(cursor.next().kind() == CharKind::LettersHalf
+                    && cursor.prev().kind() == CharKind::LettersHalf)
             {
-                cursor.add(' ')
+                cursor.add_next(' ');
             }
         }
         Some(false) => {
-            if cursor.previous().kind() == CharKind::PunctuationHalf
-                && cursor.previous().is_common_punctuation()
+            if cursor.prev().kind() == CharKind::PunctuationHalf
+                && cursor.prev().is_common_punctuation()
                 && cursor.current().is_whitespace()
             {
-                cursor.remove()
+                cursor.delete();
             }
         }
         None => (),
     }
 
     // 3. no space after full width punctuation
-    if config.no_space_after_full_width_punctuation
-        && cursor.previous().kind() == CharKind::PunctuationFull
-        && cursor.previous().is_common_punctuation()
+    if config.rules.no_space_after_full_width_punctuation
+        && cursor.prev().kind() == CharKind::PunctuationFull
+        && cursor.prev().is_common_punctuation()
         && cursor.current().is_whitespace()
     {
-        cursor.remove()
+        cursor.delete();
     }
 }

@@ -6,11 +6,12 @@
 
 use crate::{
     config::{Config, ZhScript},
-    parser::Cursor,
+    parser::TextCursor,
+    Context,
 };
 
-pub fn rule(cursor: &mut Cursor, config: &Config) {
-    cursor.set(match config.unified_punctuation {
+pub fn rule(_ctx: &Context, cursor: &mut TextCursor, config: &Config) {
+    cursor.replace(match config.rules.unified_punctuation {
         Some(ZhScript::Simplified) => match cursor.current() {
             '「' => '“',
             '」' => '”',

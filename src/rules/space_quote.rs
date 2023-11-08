@@ -19,61 +19,63 @@
 //!   - content/code x left-full-quote
 //!   - right-full-quote x content/code
 
-use crate::{
-    config::Config,
-    parser::{CharKindTrait, Cursor},
-};
+use crate::{char_kind::CharKindTrait, config::Config, parser::TextCursor, Context};
 
-pub fn rule(cursor: &mut Cursor, config: &Config) {
+pub fn rule(ctx: &Context, cursor: &mut TextCursor, config: &Config) {
     // 1. no space inside quote
-    let previous_is_left_quote = cursor.previous().is_left_quote()
-        || cursor.previous().is_half_width_quote()
-            && cursor.count_previous(|c| c == cursor.previous()) % 2 == 1;
+    let previous_is_left_quote = cursor.prev().is_left_quote()
+        || cursor.prev().is_half_width_quote() && ctx.half_width_double_quote_count % 2 == 1;
     let next_is_right_quote = cursor.next().is_right_quote()
-        || cursor.next().is_half_width_quote()
-            && cursor.count_previous(|c| c == cursor.next()) % 2 == 1;
-    if config.no_space_inside_quote
+        || cursor.next().is_half_width_quote() && ctx.half_width_double_quote_count % 2 == 1;
+    if config.rules.no_space_inside_quote
         && cursor.current().is_whitespace()
         && ((previous_is_left_quote && cursor.next().is_letters())
-            || (cursor.previous().is_letters() && next_is_right_quote))
+            || (cursor.prev().is_letters() && next_is_right_quote))
     {
-        cursor.remove()
+        cursor.delete();
     }
 
     // 2. spaces outside half quote
-    match config.space_outside_half_quote {
+    match config.rules.space_outside_half_quote {
         Some(true) => {
-            if (cursor.previous().is_letters()
+            if cursor.prev().is_letters()
                 && cursor.current().is_half_width_quote()
-                && cursor.count_previous(|c| c == cursor.current()) % 2 == 0)
-                || (cursor.previous().is_half_width_quote()
-                    && cursor.count_previous(|c| c == cursor.previous()) % 2 == 0
-                    && cursor.current().is_letters())
+                && ctx.half_width_double_quote_count % 2 == 0
             {
-                cursor.add(' ')
+                cursor.add_prev(' ');
+            }
+            if cursor.current().is_half_width_quote()
+                && ctx.half_width_double_quote_count % 2 == 0
+                && cursor.next().is_letters()
+            {
+                cursor.add_next(' ');
             }
         }
         Some(false) => {
-            let next_is_left_quote = cursor.next().is_half_width_quote()
-                && cursor.count_previous(|c| c == cursor.next()) % 2 == 0;
-            let previous_is_right_quote = cursor.previous().is_half_width_quote()
-                && cursor.count_previous(|c| c == cursor.previous()) % 2 == 0;
-            if cursor.current().is_whitespace()
-                && ((cursor.previous().is_letters() && next_is_left_quote)
-                    || (previous_is_right_quote && cursor.next().is_letters()))
+            if cursor.prev().is_letters()
+                && cursor.current().is_whitespace()
+                && cursor.next().is_half_width_quote()
+                && ctx.half_width_double_quote_count % 2 == 0
             {
-                cursor.remove()
+                cursor.delete();
+            }
+            if cursor.prev().is_half_width_quote()
+                && ctx.half_width_double_quote_count % 2 == 0
+                && cursor.current().is_whitespace()
+                && cursor.next().is_letters()
+            {
+                cursor.delete();
             }
         }
         None => (),
     }
 
     // 3. no space outside full quote
-    if config.no_space_outside_full_quote
+    if config.rules.no_space_outside_full_quote
         && cursor.current().is_whitespace()
-        && ((cursor.previous().is_letters() && cursor.next().is_left_quote())
-            || (cursor.previous().is_right_quote() && cursor.next().is_letters()))
+        && ((cursor.prev().is_letters() && cursor.next().is_left_quote())
+            || (cursor.prev().is_right_quote() && cursor.next().is_letters()))
     {
-        cursor.remove()
+        cursor.delete();
     }
 }
