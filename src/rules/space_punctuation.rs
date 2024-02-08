@@ -6,7 +6,7 @@
 //! - no_space_before_punctuation: bool
 //!   - `true`: remove spaces before a half-width punctuation (default)
 //!   - `false` or `undefined`: do nothing, just keep the original format
-//! - space_after_half_width_punctuation: Option<bool>
+//! - space_after_half_width_punctuation: bool
 //!   - `true`: ensure one space after a half-width punctuation (default)
 //!   - `false` or `undefined`: do nothing, just keep the original format
 //! - no_space_after_full_width_punctuation: bool
@@ -26,56 +26,67 @@
 
 use pulldown_cmark::Event;
 
-use crate::{
-    char_kind::{CharKind, CharKindTrait},
-    config::Config,
-    parser::{TextCursor, Token},
-    Context,
-};
+use crate::{char_kind::CharKindTrait, config::Config, cursor::Cursor, nodes::Node};
 
-pub fn rule(_ctx: &Context, cursor: &mut TextCursor, config: &Config) {
-    // 1. no space before punctuation
-    if config.rules.no_space_before_punctuation
-        && !matches!(cursor.prev(), Token::Event(Event::Code(_)))
-        && cursor.current().is_whitespace()
-        && cursor.next().is_common_punctuation()
-    {
-        cursor.delete();
+pub fn rule(cursor: &mut Cursor, config: &Config) {
+    // skip non-punctuation tokens and non-normal punctuations
+    let current = if let Node::Char { value, .. } = &cursor.current() {
+        value.clone()
+    } else {
+        return;
+    };
+    if !current.is_pause_stop_punctuation() {
+        return;
+    }
+    // skip half-width punctuations between half-width content without space
+    if cursor.is_halfwidth_punctuation_without_space_around() {
+        return;
+    }
+    // skip successive multiple half-width punctuations
+    if cursor.is_successive_halfwidth_punctuation() {
+        return;
     }
 
-    // 2. space after half width punctuation
-    match config.rules.space_after_half_width_punctuation {
-        Some(true) => {
-            if cursor.current().kind() == CharKind::PunctuationHalf
-                && cursor.current().is_common_punctuation()
-                && cursor.next().kind() != CharKind::Space
-                // skip successive multiple half-width punctuations
-                && !(cursor.next().kind() == CharKind::PunctuationHalf
-                    && cursor.next().is_common_punctuation())
-                // skip half-width punctuations between half-width content without space
-                && !(cursor.next().kind() == CharKind::LettersHalf
-                    && cursor.prev().kind() == CharKind::LettersHalf)
-            {
-                cursor.add_next(' ');
+    // check whether node is content/right-quotation/right-bracket/code
+    let is_content = |node: &Node| {
+        match &node {
+            // right-bracket
+            Node::Char {
+                value,
+                space_after: _,
+            } => value.is_bracket_punctuation() && value.is_right_punctuation(),
+            // content
+            Node::HalfwidthContent { .. } | Node::FullwidthContent { .. } => true,
+            // code
+            Node::Event {
+                value,
+                offset: _,
+                space_after: _,
+            } => matches!(value, Event::Code(_)),
+            // right-quotation
+            Node::Group { .. } => true,
+        }
+    };
+
+    // 1. content/right-quotation/right-bracket/code x punctuation
+    if config.no_space_before_pause_or_stop {
+        if let Some(before) = cursor.before_visible_mut() {
+            if is_content(before) {
+                before.remove_space_after();
             }
         }
-        Some(false) => {
-            if cursor.prev().kind() == CharKind::PunctuationHalf
-                && cursor.prev().is_common_punctuation()
-                && cursor.current().is_whitespace()
-            {
-                cursor.delete();
-            }
-        }
-        None => (),
     }
 
-    // 3. no space after full width punctuation
-    if config.rules.no_space_after_full_width_punctuation
-        && cursor.prev().kind() == CharKind::PunctuationFull
-        && cursor.prev().is_common_punctuation()
-        && cursor.current().is_whitespace()
-    {
-        cursor.delete();
+    // 2. half/full x content/left-quotation/left-bracket/code
+    if let Some(after) = cursor.after_visible_mut() {
+        if is_content(after) {
+            if current.modified().is_wide() {
+                if config.no_space_after_fullwidth_pause_or_stop {
+                    cursor.current_mut().remove_space_after();
+                }
+            } else if let Some(space) = config.space_after_halfwidth_pause_or_stop {
+                cursor.current_mut().modify_space_after(space.into());
+            }
+        }
     }
 }

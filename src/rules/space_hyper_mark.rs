@@ -1,7 +1,21 @@
-//! This rule is triming spaces of the whole string.
+//! This rule is to ensure all the existing spaces should be outside hyper
+//! marks like//!, _, [, ], etc.
 //!
-//! Options
-//! - trim_space: bool
+//! Options:
+//! - no_space_inside_mark: bool
+//!
+//! For example:
+//! - `x _//!* yyy//!* _ z` should be `x _**yyy**_ z`
+//!
+//! Details:
+//! - left-mark x left-mark: `x _//!*yyy**_ z`
+//!                             ^^^
+//! - right-mark x right-mark: `x _**yyy** _ z`
+//!                                      ^^^
+//! - left-mark x non-mark: `x _** yyy**_ z`
+//!                              ^^^
+//! - non-mark x right-mark: `x _**yyy//!*_ z`
+//!                                 ^^^
 
 use crate::{config::Config, cursor::Cursor};
 

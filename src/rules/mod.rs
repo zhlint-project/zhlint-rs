@@ -1,27 +1,37 @@
-use crate::{config::Config, parser::TextCursor, Context};
+use std::sync::OnceLock;
 
-mod punctuation_unification;
-mod punctuation_width;
-mod space_bracket;
-mod space_code;
-mod space_letters;
-mod space_punctuation;
-mod space_quote;
-mod space_successive;
-mod space_trim;
+use crate::{config::Config, cursor::Cursor};
 
-pub fn rules() -> Vec<fn(&Context, &mut TextCursor, &Config)> {
-    vec![
-        space_trim::rule,
-        space_successive::rule,
-        //
-        punctuation_width::rule,
-        punctuation_unification::rule,
-        //
-        space_code::rule,
-        space_letters::rule,
-        space_punctuation::rule,
-        space_quote::rule,
-        space_bracket::rule,
-    ]
+pub type Rule = fn(&mut Cursor, &Config);
+
+pub mod case_abbrs;
+pub mod case_zh_units;
+pub mod punctuation_unification;
+pub mod punctuation_width;
+pub mod space_bracket;
+pub mod space_code;
+pub mod space_hyper_mark;
+pub mod space_letter;
+pub mod space_punctuation;
+pub mod space_quotation;
+
+pub fn rules() -> &'static Vec<Rule> {
+    static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        vec![
+            punctuation_width::rule,
+            punctuation_unification::rule,
+            //
+            // case_abbrs::rule,
+            //
+            space_hyper_mark::rule,
+            space_code::rule,
+            space_letter::rule,
+            space_punctuation::rule,
+            space_quotation::rule,
+            space_bracket::rule,
+            //
+            case_zh_units::rule,
+        ]
+    })
 }

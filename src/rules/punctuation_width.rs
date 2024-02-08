@@ -7,80 +7,111 @@
 //! Details:
 //! - skip half-width punctuations between half-width content without space
 //! - skip successive multiple half-width punctuations
-//! - skip ' between half-width content
 
 use crate::{
-    char_kind::{CharKind, CharKindTrait},
+    char_kind::CharKindTrait,
     config::Config,
-    parser::{TextCursor, Token},
-    Context,
+    cursor::Cursor,
+    nodes::{Node, OffsetValue},
 };
 
-pub fn rule(ctx: &Context, cursor: &mut TextCursor, config: &Config) {
-    // skip non-punctuation situations
-    if !cursor.current().is_punctuation() {
+fn to_halfwidth(c: char) -> char {
+    match c {
+        '，' => ',',
+        '。' => '.',
+        '；' => ';',
+        '：' => ':',
+        '？' => '?',
+        '！' => '!',
+        '（' => '(',
+        '）' => ')',
+        '［' => '[',
+        '］' => ']',
+        '｛' => '{',
+        '｝' => '}',
+        '“' | '”' => '"',
+        '‘' | '’' => '\'',
+        _ => c,
+    }
+}
+
+fn to_fullwidth(c: char) -> char {
+    match c {
+        ',' => '，',
+        '.' => '。',
+        ';' => '；',
+        ':' => '：',
+        '?' => '？',
+        '!' => '！',
+        '(' => '（',
+        ')' => '）',
+        '[' => '［',
+        ']' => '］',
+        '{' => '｛',
+        '}' => '｝',
+        _ => c,
+    }
+}
+
+pub fn rule(cursor: &mut Cursor, config: &Config) {
+    let check_char_offset = |value: &mut OffsetValue<char>| {
+        if config.halfwidth_punctuation.contains(to_halfwidth(**value)) {
+            value.to_be(to_halfwidth(**value));
+        }
+        if config.fullwidth_punctuation.contains(to_fullwidth(**value)) {
+            value.to_be(to_fullwidth(**value));
+        }
+    };
+
+    // 1. quotations in the alter pair map
+    if let Node::Group {
+        start,
+        inner_space_before: _,
+        nodes: _,
+        end,
+        space_after: _,
+    } = &mut cursor.current_mut()
+    {
+        if start.modified() == &'"' && config.fullwidth_punctuation.contains('“') {
+            start.to_be('“');
+        } else if start.modified() == &'\'' && config.fullwidth_punctuation.contains('‘') {
+            start.to_be('‘');
+        } else {
+            check_char_offset(start);
+        }
+
+        if end.modified() == &'"' && config.fullwidth_punctuation.contains('”') {
+            end.to_be('”');
+        } else if end.modified() == &'\'' && config.fullwidth_punctuation.contains('’') {
+            end.to_be('’');
+        } else {
+            check_char_offset(end);
+        }
         return;
     }
-    // skip half-width punctuations between half-width content without space
-    if cursor.current().kind() == CharKind::PunctuationHalf
-        && cursor.prev_skip_space().kind() == CharKind::LettersHalf
-        && (cursor.next_skip_space().kind() == CharKind::LettersHalf
-            || !matches!(cursor.next_skip_space(), Token::Char(_)))
-    {
+
+    // skip non-punctuation/quotation/bracket situations
+    if !cursor.current().is_char_and(|c| c.is_punctuation()) {
         return;
     }
-    // skip ' between half-width content
-    if cursor.current() == '\''
-        && cursor.prev_skip_space().is_half_width()
-        && cursor.next_skip_space().is_half_width()
-    {
+    // skip halfwidth punctuations between halfwidth content without space
+    if cursor.is_halfwidth_punctuation_without_space_around() {
         return;
     }
     // skip successive multiple half-width punctuations
-    if cursor.current().kind() == CharKind::PunctuationHalf
-        && !cursor.current().is_bracket()
-        && !cursor.current().is_quote()
-        && cursor.current() != '\''
-        && (cursor.prev().kind() == CharKind::PunctuationHalf
-            && !cursor.prev().is_bracket()
-            && !cursor.prev().is_quote()
-            && cursor.prev() != Token::Char('\'')
-            || cursor.next().kind() == CharKind::PunctuationHalf
-                && !cursor.next().is_bracket()
-                && !cursor.next().is_quote()
-                && cursor.next() != Token::Char('\''))
-    {
+    if cursor.is_successive_halfwidth_punctuation() {
         return;
     }
 
-    if config
-        .rules
-        .half_width_punctuation
-        .contains(cursor.current().to_half_width())
+    // 1. normal punctuations in the alter width map
+    // 2. brackets in the alter width map
+    if let Node::Char {
+        value,
+        space_after: _,
+    } = &mut cursor.current_mut()
     {
-        cursor.replace(cursor.current().to_half_width());
-    }
-
-    if config
-        .rules
-        .full_width_punctuation
-        .contains(cursor.current().to_full_width())
-    {
-        cursor.replace(cursor.current().to_full_width());
-    }
-
-    if cursor.current() == '"' && config.rules.full_width_punctuation.contains("“”") {
-        if ctx.half_width_double_quote_count % 2 == 1 {
-            cursor.replace('“');
-        } else {
-            cursor.replace('”');
-        }
-    }
-    if cursor.current() == '\'' && config.rules.full_width_punctuation.contains("‘’") {
-        if ctx.half_width_single_quote_count % 2 == 1 {
-            cursor.replace('‘');
-        } else {
-            cursor.replace('’');
+        if value.modified().is_single_punctuation() || value.modified().is_bracket_punctuation() {
+            check_char_offset(value);
         }
     }
 }

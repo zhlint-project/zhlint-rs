@@ -1,13 +1,14 @@
 //! This rule will decide whether to keep a space outside inline code with
 //! content like:
 //! - xxx `foo` xxx
-//! in markdown.
+//! - xxx <code>foo</code> xxx
+//! in markdown/html.
 //!
 //! Options:
-//! - spaceOutsideCode: boolean | undefined
+//! - space_outside_code: Option<bool>
 //!   - `true`: keep one space outside (default)
 //!   - `false`: no space outside
-//!   - `undefined`: do nothing, just keep the original format
+//!   - `None`: do nothing, just keep the original format
 //!
 //! Details:
 //! - code x code
@@ -17,40 +18,47 @@
 use pulldown_cmark::Event;
 
 use crate::{
-    char_kind::CharKindTrait,
     config::Config,
-    parser::{TextCursor, Token},
-    Context,
+    cursor::Cursor,
+    nodes::{Node, Space},
 };
 
-pub fn rule(_ctx: &Context, cursor: &mut TextCursor, config: &Config) {
-    match config.rules.space_outside_code {
-        Some(true) => {
-            if cursor.current().is_letters()
-                && matches!(cursor.next(), Token::Event(Event::Code(_)))
-            {
-                cursor.add_next(' ');
-            }
-            if cursor.current().is_letters()
-                && matches!(cursor.prev(), Token::Event(Event::Code(_)))
-            {
-                cursor.add_prev(' ');
-            }
+pub fn rule(cursor: &mut Cursor, config: &Config) {
+    // skip if there is no options
+    let space = match config.space_outside_code {
+        Some(true) => Space::One,
+        Some(false) => Space::Empty,
+        None => return,
+    };
+    // skip non-code tokens
+    if !matches!(
+        cursor.current(),
+        Node::Event {
+            value: Event::Code(_),
+            offset: _,
+            space_after: _,
         }
-        Some(false) => {
-            if cursor.prev().is_letters()
-                && cursor.current().is_whitespace()
-                && matches!(cursor.next(), Token::Event(Event::Code(_)))
-            {
-                cursor.delete();
-            }
-            if matches!(cursor.prev(), Token::Event(Event::Code(_)))
-                && cursor.current().is_whitespace()
-                && cursor.next().is_letters()
-            {
-                cursor.delete();
-            }
+    ) {
+        return;
+    }
+    // skip non-after-token situations
+    // content x code
+    if let Some(before) = cursor.before_visible_mut() {
+        before.modify_space_after(space.clone());
+    }
+    // code x content or code x code
+    if let Some(after) = cursor.after_visible() {
+        if matches!(
+            after,
+            Node::HalfwidthContent { .. }
+                | Node::FullwidthContent { .. }
+                | Node::Event {
+                    value: Event::Code(_),
+                    offset: _,
+                    space_after: _,
+                }
+        ) {
+            cursor.current_mut().modify_space_after(space.clone());
         }
-        None => (),
     }
 }

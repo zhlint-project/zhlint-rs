@@ -1,227 +1,312 @@
 use std::ops::Range;
 
-use pulldown_cmark::{Event, OffsetIter};
+use pulldown_cmark::{Event, Tag};
 
-use crate::char_kind::{CharKind, CharKindTrait};
+use crate::{
+    char_kind::{
+        CharKind, CharKindTrait, CHINESE_LEFT_QUOTATION_PUNCTUATION,
+        CHINESE_RIGHT_QUOTATION_PUNCTUATION, WESTERN_QUOTATION_PUNCTUATION,
+    },
+    errors::{Result, ZhlintError},
+    lexer::Token,
+    nodes::{Node, OffsetValue, ParagraphNodes, Space},
+};
 
-pub struct EventCursor<'a> {
-    events: OffsetIter<'a, 'a>,
-    pub prev_event: Option<(Event<'a>, Range<usize>)>,
-    pub current_event: Option<(Event<'a>, Range<usize>)>,
-    pub next_event: Option<(Event<'a>, Range<usize>)>,
+pub struct Parser<'a, T: Iterator<Item = Token<'a>>> {
+    pub tokens: T,
+    pub prev: Token<'a>,
+    pub current: Token<'a>,
+    pub next: Token<'a>,
 }
 
-impl<'a> EventCursor<'a> {
-    pub fn new(mut events: OffsetIter<'a, 'a>) -> Self {
+impl<'a: 'b, 'b, T: Iterator<Item = Token<'a>>> Parser<'a, T> {
+    pub fn new(mut tokens: T) -> Self {
         Self {
-            prev_event: None,
-            current_event: events.next(),
-            next_event: events.next(),
-            events,
+            prev: Token::None,
+            current: tokens.next().unwrap_or(Token::None),
+            next: tokens.next().unwrap_or(Token::None),
+            tokens,
         }
     }
 
-    pub fn advance(&mut self) {
-        self.prev_event = self.current_event.clone();
-        self.current_event = self.next_event.clone();
-        self.next_event = self.events.next();
+    fn bump(&mut self) {
+        self.prev = self.current.clone();
+        self.current = self.next.clone();
+        self.next = self.tokens.next().unwrap_or(Token::None);
     }
 
-    pub fn to_text_cursor(&self) -> Option<TextCursor> {
-        if let Some((Event::Text(s), r)) = &self.current_event {
-            Some(TextCursor {
-                chars: s
-                    .chars()
-                    .enumerate()
-                    .map(|(i, c)| (c, Some(r.start + i)))
-                    .collect(),
-                index: 0,
-                prev_event: self.prev_event.clone(),
-                next_event: self.next_event.clone(),
-            })
-        } else {
-            None
+    fn eat_event(&mut self, t: &Event<'a>) -> bool {
+        let is_present = match &self.current {
+            Token::Event { value, offset: _ } => value == t,
+            _ => false,
+        };
+        if is_present {
+            self.bump()
         }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Token<'a> {
-    None,
-    Event(&'a Event<'a>),
-    Char(char),
-}
-
-impl<'a> From<&'a Event<'a>> for Token<'a> {
-    fn from(value: &'a Event<'a>) -> Self {
-        Token::Event(value)
-    }
-}
-
-impl<'a> From<char> for Token<'a> {
-    fn from(value: char) -> Self {
-        Token::Char(value)
-    }
-}
-
-impl<'a> From<Option<&'a (Event<'a>, Range<usize>)>> for Token<'a> {
-    fn from(value: Option<&'a (Event<'a>, Range<usize>)>) -> Self {
-        match value {
-            Some((event, _)) => Token::Event(event),
-            None => Token::None,
-        }
-    }
-}
-
-impl<'a> From<(char, Option<usize>)> for Token<'a> {
-    fn from(value: (char, Option<usize>)) -> Self {
-        Token::Char(value.0)
-    }
-}
-
-pub struct TextCursor<'a> {
-    chars: Vec<(char, Option<usize>)>,
-    index: usize,
-    prev_event: Option<(Event<'a>, Range<usize>)>,
-    next_event: Option<(Event<'a>, Range<usize>)>,
-}
-
-impl TextCursor<'_> {
-    pub fn advance(&mut self) -> bool {
-        self.index += 1;
-        self.index < self.chars.len()
+        is_present
     }
 
-    pub fn skip_str(&mut self, to_skip: &Vec<String>) {
-        for s in to_skip {
-            if s.chars()
-                .enumerate()
-                .all(|(i, c)| self.chars.get(self.index + i).is_some_and(|x| x.0 == c))
-            {
-                self.index += s.len();
-                if self.current().is_whitespace() {
-                    self.index += 1;
-                }
+    fn eat_char_while(
+        &mut self,
+        mut start_char: String,
+        mut start_offset: Range<usize>,
+        f: impl Fn(char) -> bool,
+    ) -> (String, Range<usize>) {
+        while let Token::Char { value, offset } = &self.current {
+            if !f(*value) {
                 break;
             }
+            start_offset.end = offset.end;
+            start_char.push(*value);
+            self.bump();
         }
+        (start_char, start_offset)
     }
 
-    pub fn prev(&self) -> Token {
-        if self.index == 0 {
-            self.prev_event.as_ref().into()
-        } else {
-            Token::Char(self.chars[self.index - 1].0)
+    pub fn parse(&mut self) -> Vec<Result<ParagraphNodes<'b>>> {
+        let mut res = Vec::new();
+        while self.current != Token::None {
+            res.push(self.parse_paragraph_nodes());
         }
+        res
     }
 
-    pub fn prev_skip_space(&self) -> Token {
-        let mut i = self.index;
-        loop {
-            if i == 0 {
-                break Token::None;
+    fn parse_paragraph_nodes(&mut self) -> Result<ParagraphNodes<'b>> {
+        assert!(matches!(
+            &self.current,
+            Token::Event {
+                value: Event::Start(Tag::Paragraph),
+                offset: _
             }
-            i -= 1;
-            if self.chars[i].0.kind() != CharKind::Space {
-                break self.chars[i].into();
+        ));
+        let mut res = Vec::new();
+        while !self.eat_event(&Event::End(Tag::Paragraph)) {
+            res.push(self.parse_node()?);
+        }
+        Ok(ParagraphNodes(res))
+    }
+
+    fn parse_node(&mut self) -> Result<Node<'b>> {
+        let current = self.current.clone();
+        self.bump();
+        match current {
+            Token::None => Err(ZhlintError::UnexpectedEnd),
+            Token::Event { value, offset } => Ok(Node::Event {
+                space_after: self.parse_space(offset.end),
+                value,
+                offset,
+            }),
+            Token::Char { value, offset } => {
+                match value.kind() {
+                    CharKind::LetterHalf => {
+                        let (value, offset) =
+                            self.eat_char_while(value.to_string(), offset.clone(), |c| {
+                                c.kind() == CharKind::LetterHalf
+                            });
+                        return Ok(Node::HalfwidthContent {
+                            space_after: self.parse_space(offset.end),
+                            value,
+                            offset,
+                        });
+                    }
+                    CharKind::LetterFull => {
+                        let (value, offset) =
+                            self.eat_char_while(value.to_string(), offset.clone(), |c| {
+                                c.kind() == CharKind::LetterFull
+                            });
+                        return Ok(Node::FullwidthContent {
+                            space_after: self.parse_space(offset.end),
+                            value,
+                            offset,
+                        });
+                    }
+                    _ => (),
+                }
+
+                if let Some(i) = CHINESE_LEFT_QUOTATION_PUNCTUATION
+                    .iter()
+                    .position(|c| c == &value)
+                {
+                    return self.parse_group(value, CHINESE_RIGHT_QUOTATION_PUNCTUATION[i], offset);
+                } else if CHINESE_RIGHT_QUOTATION_PUNCTUATION.contains(&value) {
+                    return Err(ZhlintError::UnclosedQuotationMark { value, offset });
+                } else if WESTERN_QUOTATION_PUNCTUATION.contains(&value) {
+                    let mut skip = false;
+                    // skip x'x
+                    if let (Token::Char { value: prev, .. }, Token::Char { value: next, .. }) =
+                        (&self.prev, &self.next)
+                    {
+                        if prev.kind() == CharKind::LetterHalf
+                            && value == '\''
+                            && next.kind() == CharKind::LetterHalf
+                        {
+                            skip = true;
+                        }
+                    }
+                    if !skip {
+                        return self.parse_group(value, value, offset);
+                    }
+                }
+
+                Ok(Node::Char {
+                    space_after: self.parse_space(offset.end),
+                    value: OffsetValue::new(value, offset),
+                })
             }
         }
     }
 
-    pub fn current(&self) -> char {
-        self.chars[self.index].0
+    fn parse_group(
+        &mut self,
+        start: char,
+        end: char,
+        start_offset: Range<usize>,
+    ) -> Result<Node<'b>> {
+        let end_offset;
+        Ok(Node::Group {
+            start: OffsetValue::new(start, start_offset.clone()),
+            inner_space_before: self.parse_space(start_offset.end),
+            nodes: {
+                let mut nodes = Vec::new();
+                loop {
+                    if let Token::Char { value, offset } = &self.current {
+                        if value == &end {
+                            end_offset = offset.clone();
+                            self.bump();
+                            break;
+                        }
+                    }
+                    nodes.push(self.parse_node()?);
+                }
+                nodes
+            },
+            end: OffsetValue::new(end, end_offset.clone()),
+            space_after: self.parse_space(end_offset.end),
+        })
     }
 
-    pub fn current_offset(&self) -> Option<usize> {
-        self.chars[self.index].1
-    }
-
-    pub fn next(&self) -> Token {
-        if self.index >= self.chars.len() - 1 {
-            self.next_event.as_ref().into()
-        } else {
-            Token::Char(self.chars[self.index + 1].0)
-        }
-    }
-
-    pub fn next_skip_space(&self) -> Token {
-        let mut i = self.index;
-        loop {
-            i += 1;
-            if i == self.chars.len() {
-                break Token::None;
-            }
-            if self.chars[i].0.kind() != CharKind::Space {
-                break self.chars[i].0.into();
-            }
-        }
-    }
-
-    pub fn delete(&mut self) {
-        self.chars.remove(self.index);
-        if self.index > 0 {
-            self.index -= 1;
-        }
-    }
-
-    pub fn replace(&mut self, c: char) {
-        self.chars[self.index].0 = c;
-    }
-
-    pub fn add_prev(&mut self, c: char) {
-        self.chars.insert(self.index, (c, None));
-    }
-
-    pub fn add_next(&mut self, c: char) {
-        self.chars.insert(self.index + 1, (c, None));
-    }
-}
-
-impl From<TextCursor<'_>> for String {
-    fn from(value: TextCursor<'_>) -> Self {
-        value.chars.into_iter().map(|(c, _)| c).collect()
+    fn parse_space(&mut self, start: usize) -> OffsetValue<Space> {
+        let start = self
+            .current
+            .offset()
+            .map(|x| x.start)
+            .unwrap_or(self.prev.offset().unwrap().end);
+        let (space, offset) = self.eat_char_while(String::new(), start..start, |c| c.is_space());
+        OffsetValue::new(space.into(), offset)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::lexer::Lexer;
+
     use super::*;
 
     #[test]
     fn test() {
-        use pulldown_cmark::Parser;
-        let md = r#"<!-- the good case -->
-
-text before (text inside) text after
-
-<!-- the bad case -->
-
-vm.$on( event, callback )
-
-<!-- then we could write this down below to make it work -->
-<!-- zhlint ignore: ( , ) -->
-"#;
-        let parser = Parser::new_ext(md, pulldown_cmark::Options::empty());
-        let mut event_cursor = EventCursor::new(parser.into_offset_iter());
-        while let Some(event) = &event_cursor.current_event {
-            match event.0 {
-                Event::Text(_) => {
-                    let mut text_cursor = event_cursor.to_text_cursor().unwrap();
-                    loop {
-                        println!(
-                            "{:?} {:?} {:?}",
-                            text_cursor.prev(),
-                            text_cursor.current(),
-                            text_cursor.next()
-                        );
-                        if !text_cursor.advance() {
-                            break;
-                        }
-                    }
-                }
-                _ => println!("Event: {:?}", event),
-            }
-            event_cursor.advance();
-        }
+        assert_eq!(
+            Parser::new(Lexer::new(r#"foo:" bar *baz*" xxx"#)).parse(),
+            vec![Ok(ParagraphNodes(vec![
+                Node::Event {
+                    value: Event::Start(Tag::Paragraph),
+                    offset: 0..20,
+                    space_after: OffsetValue {
+                        original: Space::Empty,
+                        modified: None,
+                        offset: 20..20,
+                    },
+                },
+                Node::HalfwidthContent {
+                    value: "foo".to_string(),
+                    offset: 0..3,
+                    space_after: OffsetValue {
+                        original: Space::Empty,
+                        modified: None,
+                        offset: 3..3,
+                    },
+                },
+                Node::Char {
+                    value: OffsetValue {
+                        original: ':',
+                        modified: None,
+                        offset: 3..4,
+                    },
+                    space_after: OffsetValue {
+                        original: Space::Empty,
+                        modified: None,
+                        offset: 4..4,
+                    },
+                },
+                Node::Group {
+                    start: OffsetValue {
+                        original: '"',
+                        modified: None,
+                        offset: 4..5,
+                    },
+                    inner_space_before: OffsetValue {
+                        original: Space::One,
+                        modified: None,
+                        offset: 5..6,
+                    },
+                    nodes: vec![
+                        Node::HalfwidthContent {
+                            value: "bar".to_string(),
+                            offset: 6..9,
+                            space_after: OffsetValue {
+                                original: Space::One,
+                                modified: None,
+                                offset: 9..10,
+                            },
+                        },
+                        Node::Event {
+                            value: Event::Start(Tag::Emphasis),
+                            offset: 10..15,
+                            space_after: OffsetValue {
+                                original: Space::Empty,
+                                modified: None,
+                                offset: 15..15,
+                            },
+                        },
+                        Node::HalfwidthContent {
+                            value: "baz".to_string(),
+                            offset: 11..14,
+                            space_after: OffsetValue {
+                                original: Space::Empty,
+                                modified: None,
+                                offset: 14..14,
+                            },
+                        },
+                        Node::Event {
+                            value: Event::End(Tag::Emphasis),
+                            offset: 10..15,
+                            space_after: OffsetValue {
+                                original: Space::Empty,
+                                modified: None,
+                                offset: 15..15,
+                            },
+                        },
+                    ],
+                    end: OffsetValue {
+                        original: '"',
+                        modified: None,
+                        offset: 15..16,
+                    },
+                    space_after: OffsetValue {
+                        original: Space::One,
+                        modified: None,
+                        offset: 16..17,
+                    },
+                },
+                Node::HalfwidthContent {
+                    value: "xxx".to_string(),
+                    offset: 17..20,
+                    space_after: OffsetValue {
+                        original: Space::Empty,
+                        modified: None,
+                        offset: 20..20,
+                    },
+                },
+            ]))]
+        )
     }
 }

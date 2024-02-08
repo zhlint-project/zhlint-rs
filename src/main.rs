@@ -48,10 +48,14 @@ fn main() {
                     }
                 };
 
-                let mut res: String = String::new();
-                run(&file_content, &config, &mut res).unwrap();
+                let report = run(&file_content, &config);
 
-                if let Err(e) = fs::write(&path, res) {
+                for error in report.errors.clone().into_iter().rev() {
+                    let error = miette::Error::new(error).with_source_code(file_content);
+                    println!("{:?}", error);
+                }
+
+                if let Err(e) = fs::write(&path, report.text) {
                     println!("Unable to write file: {}", e);
                     exit(1);
                 }
